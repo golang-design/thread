@@ -1,5 +1,5 @@
 module golang.design/x/thread
 
-go 1.13
+go 1.24.0
 
-require golang.org/x/sys v0.0.0-20210122093101-04d7465088b8
+require golang.org/x/sys v0.40.0
