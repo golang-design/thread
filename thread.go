@@ -4,6 +4,10 @@
 
 // Package thread provides threading facilities, such as scheduling
 // calls on a specific thread, local storage, etc.
+//
+// Deprecated: this package has moved to golang.design/x/runtime/thread.
+// Update imports to "golang.design/x/runtime/thread"; this repository is
+// no longer maintained and will be archived.
 package thread // import "golang.design/x/thread"
 
 import (
