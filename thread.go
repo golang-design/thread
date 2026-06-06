@@ -76,7 +76,7 @@ type Thread interface {
 // New creates a new thread instance.
 func New() Thread {
 	th := thread{
-		id:     atomic.AddUint64(&globalID, 1),
+		id:     globalID.Add(1),
 		fdCh:   make(chan funcData, runtime.GOMAXPROCS(0)),
 		doneCh: make(chan struct{}),
 	}
@@ -126,7 +126,7 @@ var (
 			return make(chan any)
 		},
 	}
-	globalID uint64 // atomic
+	globalID atomic.Uint64
 	_        Thread = &thread{}
 )
 
@@ -146,7 +146,7 @@ type thread struct {
 	doneCh chan struct{}
 }
 
-func (th thread) ID() uint64 {
+func (th *thread) ID() uint64 {
 	return th.id
 }
 
