@@ -20,6 +20,12 @@ type Thread interface {
 	// Call runs fn on the thread and blocks until fn returns.
 	// If the thread has been terminated, fn is discarded and Call
 	// returns immediately without running it.
+	//
+	// If Terminate may run concurrently with Call, Call can return
+	// before fn finishes (the call is abandoned). In that case a value
+	// that fn writes to a captured variable must not be read after Call
+	// returns, as fn may still be writing it. Use Eval, which returns
+	// fn's result safely, when you need a value back.
 	Call(fn func())
 
 	// Go schedules fn to run on the thread without waiting for it to
@@ -67,9 +73,24 @@ type Thread interface {
 // Eval is a function rather than a method of Thread because Go does not
 // allow methods to declare their own type parameters.
 func Eval[T any](th Thread, fn func() T) T {
-	var v T
-	th.Call(func() { v = fn() })
-	return v
+	// Hand the result back over a channel rather than a captured
+	// variable. If Terminate races with this call, Call can return
+	// while the worker is still inside fn; a captured variable would
+	// then be read here while the worker writes it (a data race),
+	// whereas a channel send/receive is synchronized. The channel is
+	// buffered so the worker never blocks delivering the result.
+	ch := make(chan T, 1)
+	th.Call(func() { ch <- fn() })
+	select {
+	case v := <-ch:
+		// Normal path: the worker sends on ch before signalling Call's
+		// completion, so the value is already available here.
+		return v
+	default:
+		// Terminate path: fn was discarded; return the zero value.
+		var zero T
+		return zero
+	}
 }
 
 // New creates a new thread instance.

@@ -141,6 +141,27 @@ func TestThread_NoRunAfterTerminate(t *testing.T) {
 	}
 }
 
+// TestThread_EvalRaceOnTerminate guards against a data race in Eval:
+// when Terminate races with the call, Call can return while the worker
+// is still executing fn. Eval must not read fn's result through a
+// shared variable in that window; it hands the result back over a
+// channel instead. Run with -race.
+func TestThread_EvalRaceOnTerminate(t *testing.T) {
+	for range 100 {
+		th := thread.New()
+		start := make(chan struct{})
+		go func() {
+			<-start
+			th.Terminate()
+		}()
+		_ = thread.Eval(th, func() int {
+			close(start)
+			time.Sleep(time.Millisecond) // keep fn running while Terminate fires
+			return 42
+		})
+	}
+}
+
 // eventually polls cond until it returns true or the timeout elapses.
 func eventually(timeout time.Duration, cond func() bool) bool {
 	deadline := time.Now().Add(timeout)
