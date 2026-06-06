@@ -2,7 +2,7 @@
 // All rights reserved. Use of this source code is governed
 // by a MIT license that can be found in the LICENSE file.
 
-// +build linux
+//go:build linux
 
 package thread_test
 
@@ -70,7 +70,7 @@ func TestThread_CallNonBlock(t *testing.T) {
 		th.SetTLS(1)
 	})
 
-	v := th.CallV(func() interface{} {
+	v := th.CallV(func() any {
 		return th.GetTLS()
 	}).(int)
 	if v != 1 {
@@ -82,11 +82,11 @@ func TestThread_CallV(t *testing.T) {
 	th := thread.New()
 	defer th.Terminate()
 
-	osThreadID1 := th.CallV(func() interface{} {
+	osThreadID1 := th.CallV(func() any {
 		return unix.Gettid()
 	}).(int)
 
-	osThreadID2 := th.CallV(func() interface{} {
+	osThreadID2 := th.CallV(func() any {
 		return unix.Gettid()
 	}).(int)
 	if osThreadID1 != osThreadID2 {
@@ -101,14 +101,14 @@ func TestThread_TLS(t *testing.T) {
 	th2 := thread.New()
 	th2.SetTLS("world")
 
-	tls1 := th1.CallV(func() interface{} {
+	tls1 := th1.CallV(func() any {
 		return th1.GetTLS()
 	}).(string)
 	if strings.Compare(tls1, "hello") != 0 {
 		t.Fatalf("incorrect TLS access")
 	}
 	t.Log(tls1)
-	tls2 := th2.CallV(func() interface{} {
+	tls2 := th2.CallV(func() any {
 		return th2.GetTLS()
 	}).(string)
 	if strings.Compare(tls2, "world") != 0 {

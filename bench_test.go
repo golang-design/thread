@@ -21,7 +21,7 @@ func BenchmarkThread_CallV(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_ = th.CallV(func() interface{} {
+		_ = th.CallV(func() any {
 			return true
 		}).(bool)
 	}
@@ -36,7 +36,7 @@ func BenchmarkThread_TLS(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = th.CallV(func() interface{} {
+		_ = th.CallV(func() any {
 			return th.GetTLS()
 		})
 	}

@@ -31,7 +31,7 @@ type Thread interface {
 	// In particular:
 	//
 	//   th := thread.New()
-	//   var ret interface{}
+	//   var ret any
 	//   th.Call(func() {
 	//      ret = 1
 	//   })
@@ -39,12 +39,12 @@ type Thread interface {
 	// will cause variable ret be allocated on the heap, whereas
 	//
 	//   th := thread.New()
-	//   ret := th.CallV(func() interface{} {
+	//   ret := th.CallV(func() any {
 	//     return 1
 	//   }).(int)
 	//
 	// will offer zero allocation benefits.
-	CallV(fn func() interface{}) interface{}
+	CallV(fn func() any) any
 
 	// SetTLS stores a given value to the local storage of the given
 	// thread. This method must be accessed in Call, or CallV, or
@@ -54,7 +54,7 @@ type Thread interface {
 	//   th.Call(func() {
 	//      th.SetTLS("store in thread local storage")
 	//   })
-	SetTLS(x interface{})
+	SetTLS(x any)
 
 	// GetTLS returns the locally stored value from local storage of
 	// the given thread. This method must be access in Call, or CallV,
@@ -66,7 +66,7 @@ type Thread interface {
 	//      // ... do what ever you want to do with tls value ...
 	//   })
 	//
-	GetTLS() interface{}
+	GetTLS() any
 
 	// Terminate terminates the given thread gracefully.
 	// Scheduled but unexecuted calls will be discarded.
@@ -80,7 +80,7 @@ func New() Thread {
 		fdCh:   make(chan funcData, runtime.GOMAXPROCS(0)),
 		doneCh: make(chan struct{}),
 	}
-	runtime.SetFinalizer(&th, func(th interface{}) {
+	runtime.SetFinalizer(&th, func(th any) {
 		th.(*thread).Terminate()
 	})
 	go func() {
@@ -97,7 +97,7 @@ func New() Thread {
 						}()
 						fd.fn()
 					} else if fd.fnv != nil {
-						var ret interface{}
+						var ret any
 						defer func() {
 							if fd.ret != nil {
 								fd.ret <- ret
@@ -117,13 +117,13 @@ func New() Thread {
 
 var (
 	donePool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return make(chan struct{})
 		},
 	}
 	varPool = sync.Pool{
-		New: func() interface{} {
-			return make(chan interface{})
+		New: func() any {
+			return make(chan any)
 		},
 	}
 	globalID uint64 // atomic
@@ -134,13 +134,13 @@ type funcData struct {
 	fn   func()
 	done chan struct{}
 
-	fnv func() interface{}
-	ret chan interface{}
+	fnv func() any
+	ret chan any
 }
 
 type thread struct {
 	id  uint64
-	tls interface{}
+	tls any
 
 	fdCh   chan funcData
 	doneCh chan struct{}
@@ -180,7 +180,7 @@ func (th *thread) CallNonBlock(fn func()) {
 	}
 }
 
-func (th *thread) CallV(fn func() interface{}) (ret interface{}) {
+func (th *thread) CallV(fn func() any) (ret any) {
 	if fn == nil {
 		return nil
 	}
@@ -189,7 +189,7 @@ func (th *thread) CallV(fn func() interface{}) (ret interface{}) {
 	case <-th.doneCh:
 		return nil
 	default:
-		done := varPool.Get().(chan interface{})
+		done := varPool.Get().(chan any)
 		defer varPool.Put(done)
 		defer func() { ret = <-done }()
 
@@ -198,11 +198,11 @@ func (th *thread) CallV(fn func() interface{}) (ret interface{}) {
 	}
 }
 
-func (th *thread) GetTLS() interface{} {
+func (th *thread) GetTLS() any {
 	return th.tls
 }
 
-func (th *thread) SetTLS(x interface{}) {
+func (th *thread) SetTLS(x any) {
 	th.tls = x
 }
 
