@@ -7,6 +7,7 @@ package thread_test
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,6 +102,42 @@ func TestThread_CleanupStopsWorker(t *testing.T) {
 	if !stopped {
 		t.Fatalf("workers not reclaimed after Threads became unreachable: "+
 			"created %d, before=%d now=%d", n, before, runtime.NumGoroutine())
+	}
+}
+
+// TestThread_NoRunAfterTerminate verifies the contract that scheduled
+// but unexecuted calls are discarded after Terminate: a call must never
+// run on a terminated thread. The worker is kept busy so it is still
+// alive when the post-Terminate call is enqueued, exposing the select
+// race that would otherwise let a queued call slip through and run.
+func TestThread_NoRunAfterTerminate(t *testing.T) {
+	for i := range 500 {
+		th := thread.New()
+
+		started := make(chan struct{})
+		block := make(chan struct{})
+		th.CallNonBlock(func() {
+			close(started)
+			<-block
+		})
+		<-started // worker is now busy
+
+		th.Terminate() // terminate while the worker is occupied
+
+		var ran atomic.Bool
+		ret := make(chan struct{})
+		go func() {
+			th.Call(func() { ran.Store(true) })
+			close(ret)
+		}()
+		time.Sleep(time.Millisecond) // give Call time to try enqueuing
+		close(block)                 // release the worker
+		<-ret
+		time.Sleep(time.Millisecond) // grace for any stray execution
+
+		if ran.Load() {
+			t.Fatalf("iter %d: call executed after Terminate", i)
+		}
 	}
 }
 

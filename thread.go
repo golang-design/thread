@@ -119,6 +119,14 @@ func worker(fdCh chan funcData, quit chan struct{}) {
 	// runtime terminate the underlying OS thread. That is the intended
 	// behavior for a dedicated thread.
 	for {
+		// Give quit priority: once terminated, scheduled but unexecuted
+		// calls must be discarded, not run. Without this pre-check the
+		// select below could pick a queued call over a ready quit.
+		select {
+		case <-quit:
+			return
+		default:
+		}
 		select {
 		case <-quit:
 			return
@@ -195,6 +203,16 @@ func (th *thread) Call(fn func()) {
 		return
 	}
 
+	// Don't enqueue after termination. A bare send/quit select would
+	// race (both cases ready once quit is closed and the buffer has
+	// room); this leading check makes a completed Terminate win
+	// deterministically.
+	select {
+	case <-th.quit:
+		return
+	default:
+	}
+
 	done := donePool.Get().(chan struct{})
 	select {
 	case <-th.quit:
@@ -216,6 +234,12 @@ func (th *thread) CallNonBlock(fn func()) {
 	if fn == nil {
 		return
 	}
+	// See Call: don't enqueue after termination.
+	select {
+	case <-th.quit:
+		return
+	default:
+	}
 	select {
 	case <-th.quit:
 	case th.fdCh <- funcData{fn: fn}:
@@ -225,6 +249,13 @@ func (th *thread) CallNonBlock(fn func()) {
 func (th *thread) CallV(fn func() any) (ret any) {
 	if fn == nil {
 		return nil
+	}
+
+	// See Call: don't enqueue after termination.
+	select {
+	case <-th.quit:
+		return nil
+	default:
 	}
 
 	out := varPool.Get().(chan any)
