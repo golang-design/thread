@@ -70,64 +70,84 @@ type Thread interface {
 
 	// Terminate terminates the given thread gracefully.
 	// Scheduled but unexecuted calls will be discarded.
+	// It is safe to call Terminate multiple times, including
+	// concurrently from multiple goroutines.
 	Terminate()
 }
 
 // New creates a new thread instance.
 func New() Thread {
-	th := thread{
-		id:     globalID.Add(1),
-		fdCh:   make(chan funcData, runtime.GOMAXPROCS(0)),
-		doneCh: make(chan struct{}),
+	th := &thread{
+		id:   globalID.Add(1),
+		fdCh: make(chan funcData, runtime.GOMAXPROCS(0)),
+		quit: make(chan struct{}),
+		once: &sync.Once{},
 	}
-	runtime.SetFinalizer(&th, func(th any) {
-		th.(*thread).Terminate()
-	})
-	go func() {
-		runtime.LockOSThread()
-		for {
-			select {
-			case fd := <-th.fdCh:
-				func() {
-					if fd.fn != nil {
-						defer func() {
-							if fd.done != nil {
-								fd.done <- struct{}{}
-							}
-						}()
-						fd.fn()
-					} else if fd.fnv != nil {
-						var ret any
-						defer func() {
-							if fd.ret != nil {
-								fd.ret <- ret
-							}
-						}()
-						ret = fd.fnv()
-					}
-				}()
-			case <-th.doneCh:
-				close(th.doneCh)
-				return
-			}
+
+	// The worker goroutine captures only the channels, never th itself.
+	// If it captured th, the running goroutine would keep th reachable
+	// forever, the cleanup below could never fire, and the goroutine
+	// (with its locked OS thread) would leak whenever a caller drops a
+	// Thread without calling Terminate.
+	go worker(th.fdCh, th.quit)
+
+	// As a safety net, stop the worker once th becomes unreachable.
+	// runtime.AddCleanup forbids the cleanup func from referencing th,
+	// which is exactly the property we need here: the closure touches
+	// only the once and the quit channel.
+	sd := shutdown{once: th.once, quit: th.quit}
+	runtime.AddCleanup(th, func(s shutdown) {
+		s.once.Do(func() { close(s.quit) })
+	}, sd)
+
+	return th
+}
+
+// shutdown carries the data needed to stop a thread's worker without
+// referencing the Thread itself (a requirement of runtime.AddCleanup).
+type shutdown struct {
+	once *sync.Once
+	quit chan struct{}
+}
+
+// worker runs on a dedicated, OS-locked thread and serially executes
+// scheduled calls until quit is closed. It deliberately does not close
+// over the owning thread value, so the thread can be garbage collected.
+func worker(fdCh chan funcData, quit chan struct{}) {
+	runtime.LockOSThread()
+	// Note: the goroutine returns without UnlockOSThread, which makes the
+	// runtime terminate the underlying OS thread. That is the intended
+	// behavior for a dedicated thread.
+	for {
+		select {
+		case <-quit:
+			return
+		case fd := <-fdCh:
+			fd.run()
 		}
-	}()
-	return &th
+	}
 }
 
 var (
+	// donePool and varPool recycle the result channels used by Call and
+	// CallV. The channels are buffered (cap 1) so the worker's result
+	// send never blocks, even if the caller stopped waiting because the
+	// thread was terminated. A channel is returned to the pool only once
+	// it is known to be drained; a channel abandoned on the terminate
+	// path is dropped (left to the GC) so a future call never receives a
+	// dirty channel.
 	donePool = sync.Pool{
 		New: func() any {
-			return make(chan struct{})
+			return make(chan struct{}, 1)
 		},
 	}
 	varPool = sync.Pool{
 		New: func() any {
-			return make(chan any)
+			return make(chan any, 1)
 		},
 	}
 	globalID atomic.Uint64
-	_        Thread = &thread{}
+	_        Thread = &thread{once: &sync.Once{}}
 )
 
 type funcData struct {
@@ -138,12 +158,32 @@ type funcData struct {
 	ret chan any
 }
 
+// run executes the scheduled call and reports completion on the
+// corresponding result channel, if any. The result channels are
+// buffered, so these sends never block.
+func (fd funcData) run() {
+	switch {
+	case fd.fn != nil:
+		if fd.done != nil {
+			defer func() { fd.done <- struct{}{} }()
+		}
+		fd.fn()
+	case fd.fnv != nil:
+		var ret any
+		if fd.ret != nil {
+			defer func() { fd.ret <- ret }()
+		}
+		ret = fd.fnv()
+	}
+}
+
 type thread struct {
 	id  uint64
 	tls any
 
-	fdCh   chan funcData
-	doneCh chan struct{}
+	fdCh chan funcData
+	quit chan struct{}
+	once *sync.Once
 }
 
 func (th *thread) ID() uint64 {
@@ -155,17 +195,21 @@ func (th *thread) Call(fn func()) {
 		return
 	}
 
+	done := donePool.Get().(chan struct{})
 	select {
-	case <-th.doneCh:
+	case <-th.quit:
+		donePool.Put(done) // unused, still clean
 		return
-	default:
-		done := donePool.Get().(chan struct{})
-		defer donePool.Put(done)
-		defer func() { <-done }()
-
-		th.fdCh <- funcData{fn: fn, done: done}
+	case th.fdCh <- funcData{fn: fn, done: done}:
 	}
-	return
+
+	select {
+	case <-done:
+		donePool.Put(done) // drained, safe to reuse
+	case <-th.quit:
+		// Terminated while waiting. The worker may still write to
+		// done's buffer, so do not reuse it; let the GC reclaim it.
+	}
 }
 
 func (th *thread) CallNonBlock(fn func()) {
@@ -173,10 +217,8 @@ func (th *thread) CallNonBlock(fn func()) {
 		return
 	}
 	select {
-	case <-th.doneCh:
-		return
-	default:
-		th.fdCh <- funcData{fn: fn}
+	case <-th.quit:
+	case th.fdCh <- funcData{fn: fn}:
 	}
 }
 
@@ -185,16 +227,21 @@ func (th *thread) CallV(fn func() any) (ret any) {
 		return nil
 	}
 
+	out := varPool.Get().(chan any)
 	select {
-	case <-th.doneCh:
+	case <-th.quit:
+		varPool.Put(out) // unused, still clean
 		return nil
-	default:
-		done := varPool.Get().(chan any)
-		defer varPool.Put(done)
-		defer func() { ret = <-done }()
+	case th.fdCh <- funcData{fnv: fn, ret: out}:
+	}
 
-		th.fdCh <- funcData{fnv: fn, ret: done}
-		return
+	select {
+	case ret = <-out:
+		varPool.Put(out) // drained, safe to reuse
+		return ret
+	case <-th.quit:
+		// Terminated while waiting; abandon out (see Call).
+		return nil
 	}
 }
 
@@ -207,14 +254,5 @@ func (th *thread) SetTLS(x any) {
 }
 
 func (th *thread) Terminate() {
-	select {
-	case <-th.doneCh:
-		return
-	default:
-		th.doneCh <- struct{}{}
-		select {
-		case <-th.doneCh:
-			return
-		}
-	}
+	th.once.Do(func() { close(th.quit) })
 }
