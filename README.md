@@ -19,4 +19,4 @@ th.Call(func() {
 
 ## License
 
-MIT &copy; 2021 The golang.design Initiative
+MIT &copy; 2020 - 2026 The golang.design Initiative
