@@ -62,33 +62,33 @@ func TestThread_Terminate(t *testing.T) {
 	})
 }
 
-func TestThread_CallNonBlock(t *testing.T) {
+func TestThread_Go(t *testing.T) {
 	th := thread.New()
 	defer th.Terminate()
 
-	th.CallNonBlock(func() {
+	th.Go(func() {
 		th.SetTLS(1)
 	})
 
-	v := th.CallV(func() any {
-		return th.GetTLS()
-	}).(int)
+	v := thread.Eval(th, func() int {
+		return th.GetTLS().(int)
+	})
 	if v != 1 {
 		t.Fatalf("non blocking call is not scheduled before a blocking call.")
 	}
 }
 
-func TestThread_CallV(t *testing.T) {
+func TestThread_Eval(t *testing.T) {
 	th := thread.New()
 	defer th.Terminate()
 
-	osThreadID1 := th.CallV(func() any {
+	osThreadID1 := thread.Eval(th, func() int {
 		return unix.Gettid()
-	}).(int)
+	})
 
-	osThreadID2 := th.CallV(func() any {
+	osThreadID2 := thread.Eval(th, func() int {
 		return unix.Gettid()
-	}).(int)
+	})
 	if osThreadID1 != osThreadID2 {
 		t.Fatalf("failed to schedule function call on the same thread.")
 	}
@@ -101,16 +101,16 @@ func TestThread_TLS(t *testing.T) {
 	th2 := thread.New()
 	th2.SetTLS("world")
 
-	tls1 := th1.CallV(func() any {
-		return th1.GetTLS()
-	}).(string)
+	tls1 := thread.Eval(th1, func() string {
+		return th1.GetTLS().(string)
+	})
 	if strings.Compare(tls1, "hello") != 0 {
 		t.Fatalf("incorrect TLS access")
 	}
 	t.Log(tls1)
-	tls2 := th2.CallV(func() any {
-		return th2.GetTLS()
-	}).(string)
+	tls2 := thread.Eval(th2, func() string {
+		return th2.GetTLS().(string)
+	})
 	if strings.Compare(tls2, "world") != 0 {
 		t.Fatalf("incorrect TLS access")
 	}

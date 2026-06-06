@@ -116,7 +116,7 @@ func TestThread_NoRunAfterTerminate(t *testing.T) {
 
 		started := make(chan struct{})
 		block := make(chan struct{})
-		th.CallNonBlock(func() {
+		th.Go(func() {
 			close(started)
 			<-block
 		})

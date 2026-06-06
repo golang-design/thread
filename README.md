@@ -11,9 +11,21 @@ import "golang.design/x/thread"
 
 ```go
 th := thread.New()
+defer th.Terminate()
 
+// Run on the thread and block until it returns.
 th.Call(func() {
-    // call on the created thread
+    // ... runs on the created thread ...
+})
+
+// Schedule on the thread without waiting.
+th.Go(func() {
+    // ... runs on the created thread ...
+})
+
+// Run on the thread and return a typed value.
+n := thread.Eval(th, func() int {
+    return 42
 })
 ```
 

@@ -17,38 +17,18 @@ type Thread interface {
 	// ID returns the ID of the thread.
 	ID() uint64
 
-	// Call calls fn from the given thread. It blocks until fn returns.
+	// Call runs fn on the thread and blocks until fn returns.
+	// If the thread has been terminated, fn is discarded and Call
+	// returns immediately without running it.
 	Call(fn func())
 
-	// CallNonBlock call fn from the given thread without waiting
-	// fn to complete.
-	CallNonBlock(fn func())
+	// Go schedules fn to run on the thread without waiting for it to
+	// complete. If the thread has been terminated, fn is discarded.
+	Go(fn func())
 
-	// CallV call fn from the given thread and returns the returned
-	// value from fn.
-	//
-	// The purpose of this function is to avoid value escaping.
-	// In particular:
-	//
-	//   th := thread.New()
-	//   var ret any
-	//   th.Call(func() {
-	//      ret = 1
-	//   })
-	//
-	// will cause variable ret be allocated on the heap, whereas
-	//
-	//   th := thread.New()
-	//   ret := th.CallV(func() any {
-	//     return 1
-	//   }).(int)
-	//
-	// will offer zero allocation benefits.
-	CallV(fn func() any) any
-
-	// SetTLS stores a given value to the local storage of the given
-	// thread. This method must be accessed in Call, or CallV, or
-	// CallNonBlock. For instance:
+	// SetTLS stores a value in the thread's local storage. It must be
+	// called from within Call, Go, or Eval so the access happens on the
+	// thread itself. For instance:
 	//
 	//   th := thread.New()
 	//   th.Call(func() {
@@ -56,23 +36,40 @@ type Thread interface {
 	//   })
 	SetTLS(x any)
 
-	// GetTLS returns the locally stored value from local storage of
-	// the given thread. This method must be access in Call, or CallV,
-	// or CallNonBlock. For instance:
+	// GetTLS returns the value stored in the thread's local storage. It
+	// must be called from within Call, Go, or Eval so the access happens
+	// on the thread itself. For instance:
 	//
 	//   th := thread.New()
 	//   th.Call(func() {
 	//      tls := th.GetTLS()
-	//      // ... do what ever you want to do with tls value ...
+	//      // ... do whatever you want to do with the tls value ...
 	//   })
-	//
 	GetTLS() any
 
-	// Terminate terminates the given thread gracefully.
-	// Scheduled but unexecuted calls will be discarded.
+	// Terminate terminates the thread gracefully.
+	// Scheduled but unexecuted calls are discarded.
 	// It is safe to call Terminate multiple times, including
 	// concurrently from multiple goroutines.
 	Terminate()
+}
+
+// Eval runs fn on the thread and returns its result. It blocks until
+// fn returns. If the thread has been terminated, fn is discarded and
+// Eval returns the zero value of T.
+//
+// Eval is the typed counterpart of Call: it preserves fn's return type
+// without an interface conversion or a type assertion at the call site.
+//
+//	th := thread.New()
+//	n := thread.Eval(th, func() int { return 1 })
+//
+// Eval is a function rather than a method of Thread because Go does not
+// allow methods to declare their own type parameters.
+func Eval[T any](th Thread, fn func() T) T {
+	var v T
+	th.Call(func() { v = fn() })
+	return v
 }
 
 // New creates a new thread instance.
@@ -137,9 +134,9 @@ func worker(fdCh chan funcData, quit chan struct{}) {
 }
 
 var (
-	// donePool and varPool recycle the result channels used by Call and
-	// CallV. The channels are buffered (cap 1) so the worker's result
-	// send never blocks, even if the caller stopped waiting because the
+	// donePool recycles the completion channels used by Call. The
+	// channels are buffered (cap 1) so the worker's completion send
+	// never blocks, even if the caller stopped waiting because the
 	// thread was terminated. A channel is returned to the pool only once
 	// it is known to be drained; a channel abandoned on the terminate
 	// path is dropped (left to the GC) so a future call never receives a
@@ -149,11 +146,6 @@ var (
 			return make(chan struct{}, 1)
 		},
 	}
-	varPool = sync.Pool{
-		New: func() any {
-			return make(chan any, 1)
-		},
-	}
 	globalID atomic.Uint64
 	_        Thread = &thread{once: &sync.Once{}}
 )
@@ -161,28 +153,15 @@ var (
 type funcData struct {
 	fn   func()
 	done chan struct{}
-
-	fnv func() any
-	ret chan any
 }
 
-// run executes the scheduled call and reports completion on the
-// corresponding result channel, if any. The result channels are
-// buffered, so these sends never block.
+// run executes the scheduled call and reports completion on done, if
+// any. done is buffered, so the send never blocks.
 func (fd funcData) run() {
-	switch {
-	case fd.fn != nil:
-		if fd.done != nil {
-			defer func() { fd.done <- struct{}{} }()
-		}
-		fd.fn()
-	case fd.fnv != nil:
-		var ret any
-		if fd.ret != nil {
-			defer func() { fd.ret <- ret }()
-		}
-		ret = fd.fnv()
+	if fd.done != nil {
+		defer func() { fd.done <- struct{}{} }()
 	}
+	fd.fn()
 }
 
 type thread struct {
@@ -230,7 +209,7 @@ func (th *thread) Call(fn func()) {
 	}
 }
 
-func (th *thread) CallNonBlock(fn func()) {
+func (th *thread) Go(fn func()) {
 	if fn == nil {
 		return
 	}
@@ -243,36 +222,6 @@ func (th *thread) CallNonBlock(fn func()) {
 	select {
 	case <-th.quit:
 	case th.fdCh <- funcData{fn: fn}:
-	}
-}
-
-func (th *thread) CallV(fn func() any) (ret any) {
-	if fn == nil {
-		return nil
-	}
-
-	// See Call: don't enqueue after termination.
-	select {
-	case <-th.quit:
-		return nil
-	default:
-	}
-
-	out := varPool.Get().(chan any)
-	select {
-	case <-th.quit:
-		varPool.Put(out) // unused, still clean
-		return nil
-	case th.fdCh <- funcData{fnv: fn, ret: out}:
-	}
-
-	select {
-	case ret = <-out:
-		varPool.Put(out) // drained, safe to reuse
-		return ret
-	case <-th.quit:
-		// Terminated while waiting; abandon out (see Call).
-		return nil
 	}
 }
 
